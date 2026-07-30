@@ -41,3 +41,13 @@ nvdiffrast = ["nvdiffrast @ git+https://github.com/NVlabs/nvdiffrast.git"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# hc3dv2 fork: scope collection to tests/, which covers the additions made on
+# this branch. A bare `pytest` would otherwise also collect
+# src/o3b/cv/geometry/test_viewpoints.py (which imports a `get_front_viewpoint`
+# that no longer exists in o3b.data.viz), the nvdiffrast tests under
+# src/o3b/cv/render/utils/tests, and the vendored Mask2Former suite — all of
+# which fail at *collection*, aborting the run before anything else executes.
+# Pass a path explicitly to reach them.
+testpaths = ["tests"]
