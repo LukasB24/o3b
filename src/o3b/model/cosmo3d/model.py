@@ -14,6 +14,9 @@ CoSMo3D consumes the surface directly, so it is registered in ``_SELF_RENDERING`
 (``o3b/data/datatypes/mesh.py``) — the ``vuni100`` multi-view rig is skipped and
 ``n_views`` / ``resolution`` in the mesh type are inert for this model.
 
+The upstream repo is an external checkout rather than vendored code; see
+``_resolve_repo_path`` for how it is found and ``COSMO3D_ROOT`` to override.
+
 forward(ObjectBatch) -> ObjectBatch with verts3d_feats (B, V, 64).
 """
 
@@ -111,7 +114,7 @@ class CoSMo3DModel(OD3D_Model):
 
     def __init__(
         self,
-        repo_path: str = "third_party/cosmo3d",
+        repo_path: str | None = None,
         ckpt_path: str = "checkpoints/cosmo3d/ours_final.pth",
         n_sample_pts: int = 5000,
         grid_size: float = 0.02,
@@ -123,9 +126,11 @@ class CoSMo3DModel(OD3D_Model):
         # Fixed seed for surface sampling: PCK is a benchmark number and must
         # not drift between runs. Set to None for random sampling.
         self.seed = seed
-        # env overrides win, so the model also works from a CWD without the
-        # symlinked repo/checkpoint tree.
-        self.repo_path = os.environ.get("COSMO3D_ROOT", repo_path)
+        # Explicit config value wins, then COSMO3D_ROOT, then the search in
+        # _resolve_repo_path(). Deliberately NOT defaulted to a CWD-relative
+        # "third_party/cosmo3d": o3b is a standalone fork, so it must not bake
+        # in the directory layout of whatever repo happens to vendor it.
+        self.repo_path = repo_path or os.environ.get("COSMO3D_ROOT")
         self.ckpt_path = os.environ.get("COSMO3D_CKPT", ckpt_path)
         self.n_sample_pts = n_sample_pts
         self.grid_size = grid_size
@@ -136,18 +141,52 @@ class CoSMo3DModel(OD3D_Model):
         self.use_texture = use_texture
         self.out_dim = 64
 
+    def _resolve_repo_path(self) -> Path:
+        """Locate the CoSMo3D checkout, or raise listing everything that was tried.
+
+        Unlike PartField and DenseMatcher, CoSMo3D is not vendored into o3b.
+        That is a licensing constraint rather than a technical one: upstream
+        publishes no LICENSE, so it is all-rights-reserved by default and we
+        have no grant to redistribute it inside this repo. It therefore stays
+        an external checkout that has to be located at runtime.
+        """
+        if self.repo_path:
+            repo = Path(self.repo_path).expanduser().resolve()
+            if repo.exists():
+                return repo
+            raise RuntimeError(
+                f"[CoSMo3D] repository not found at {repo} (from "
+                f"{'COSMO3D_ROOT' if os.environ.get('COSMO3D_ROOT') else 'repo_path config'}). "
+                "Clone JinLi998/CoSMo3D there, or point COSMO3D_ROOT at an existing checkout."
+            )
+
+        candidates = [
+            # Sibling of the o3b checkout — the layout setup/install.sh creates
+            # (<repo>/third_party/{o3b,cosmo3d}). Derived from this file's own
+            # location, so it does not depend on the current working directory.
+            Path(__file__).resolve().parents[4].parent / "cosmo3d",
+            # Back-compat for running from a repo root that has third_party/.
+            Path.cwd() / "third_party" / "cosmo3d",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate.resolve()
+
+        tried = "\n  ".join(str(c) for c in candidates)
+        raise RuntimeError(
+            "[CoSMo3D] could not locate the CoSMo3D checkout. Tried:\n  "
+            f"{tried}\n"
+            "Set COSMO3D_ROOT to an existing clone of JinLi998/CoSMo3D, or run "
+            "`bash setup/install.sh` to create one."
+        )
+
     def _build_backbone(self, device: torch.device):
         cache_key = (str(self.ckpt_path), str(device))
         cached = _MODULE_CACHE.get(cache_key)
         if cached is not None:
             return cached
 
-        repo = Path(self.repo_path).resolve()
-        if not repo.exists():
-            raise RuntimeError(
-                f"[CoSMo3D] repository not found at {repo}. Symlink or clone "
-                "JinLi998/CoSMo3D there, or set COSMO3D_ROOT."
-            )
+        repo = self._resolve_repo_path()
 
         _inject_flash_attn_stub()
         if str(repo) not in sys.path:

@@ -1,5 +1,7 @@
 class_name: CoSMo3D
-repo_path: "third_party/cosmo3d"          # JinLi998/CoSMo3D clone (PointTransformerV3)
+# repo_path is intentionally unset: the JinLi998/CoSMo3D clone (PointTransformerV3)
+# is located at runtime by CoSMo3DModel._resolve_repo_path — COSMO3D_ROOT first,
+# then a sibling checkout next to this repo. Set it here only to override that.
 ckpt_path: "checkpoints/cosmo3d/ours_final.pth"
 n_sample_pts: 5000                        # upstream default; 20k measured no better (within +-0.015 noise)
 grid_size: 0.02                            # GridSample voxel edge, metric (model is not scale-free)
