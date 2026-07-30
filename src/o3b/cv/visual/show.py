@@ -341,6 +341,11 @@ def plotly_fig_2_tensor(fig, width=None, height=None):
     return img
 
 
+# Offscreen renderers reused across calls, keyed by (width, height): creating a
+# fresh one per render leaks a GL context each time, which breaks EGL on WSL/mesa.
+_OFFSCREEN_RENDERERS: dict = {}
+
+
 def render_trimesh_to_tensor(
     mesh_trimesh,
     cam_intr4x4,
@@ -430,15 +435,9 @@ def render_trimesh_to_tensor(
 
     # pyrender.Viewer(scene, shadows=True)
 
-    # Create an offscreen renderer (cached per size: creating a fresh renderer
-    # per call leaks one GL context per render, which breaks EGL on WSL/mesa)
+    # Reuse the offscreen renderer for this size (see _OFFSCREEN_RENDERERS above)
     if "DISPLAY" not in os.environ:
         os.environ["PYOPENGL_PLATFORM"] = "egl"
-    global _OFFSCREEN_RENDERERS
-    try:
-        _OFFSCREEN_RENDERERS
-    except NameError:
-        _OFFSCREEN_RENDERERS = {}
     renderer = _OFFSCREEN_RENDERERS.get((width, height))
     if renderer is None:
         renderer = pyrender.OffscreenRenderer(width, height)

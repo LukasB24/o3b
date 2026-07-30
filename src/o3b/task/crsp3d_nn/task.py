@@ -400,11 +400,20 @@ class Crsp3DNNTask(OD3D_Task):
       PCK    = fraction where pred target vertex has the correct part label
     """
 
+    FEAT_METRICS = ("euclidean", "cosine")
+
     def __init__(self, feat_metric: str = "euclidean", **kwargs):
         # feat_metric: "euclidean" (default, raw cdist) or "cosine"
         # (L2-normalize features before the nearest-neighbour cdist). Must be an
         # explicit named param so build_task's config forwarding picks it up.
-        self.feat_metric = feat_metric or "euclidean"
+        feat_metric = feat_metric or "euclidean"
+        # Reject unknown values rather than defaulting: a typo would otherwise
+        # silently report euclidean numbers under a cosine label.
+        if feat_metric not in self.FEAT_METRICS:
+            raise ValueError(
+                f"Unknown feat_metric {feat_metric!r}; expected one of {self.FEAT_METRICS}"
+            )
+        self.feat_metric = feat_metric
 
     def forward(self, batch: ObjectPairBatch, return_qualit: bool = True) -> Tuple[ObjectPairQuantBatch, ObjectPairQualitBatch]:
         src_verts       = batch.src_verts3d             # (B, V_src, 3)

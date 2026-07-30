@@ -117,8 +117,12 @@ class CoSMo3DModel(OD3D_Model):
         grid_size: float = 0.02,
         freeze: bool = True,
         use_texture: bool = False,
+        seed: int = 0,
     ):
         super().__init__()
+        # Fixed seed for surface sampling: PCK is a benchmark number and must
+        # not drift between runs. Set to None for random sampling.
+        self.seed = seed
         # env overrides win, so the model also works from a CWD without the
         # symlinked repo/checkpoint tree.
         self.repo_path = os.environ.get("COSMO3D_ROOT", repo_path)
@@ -178,20 +182,28 @@ class CoSMo3DModel(OD3D_Model):
         return model
 
     @staticmethod
-    def _sample_colored_surface(mesh, n_pts: int):
-        """n_pts surface samples with texture RGB in [0,1] and face normals."""
+    def _sample_colored_surface(mesh, n_pts: int, seed: int | None = 0):
+        """n_pts surface samples with texture RGB in [0,1] and face normals.
+
+        Returns ``(pts, rgb, nrm, has_texture)``. ``has_texture`` is False when
+        no usable colour was found and ``rgb`` is the flat mid-grey fallback —
+        the caller needs it to tell a genuine textured run apart from one that
+        silently degraded to the grey ablation.
+        """
         import numpy as np
         import trimesh
         from scipy.spatial import cKDTree
 
         try:
             pts, face_idx, colors = trimesh.sample.sample_surface(
-                mesh, n_pts, sample_color=True
+                mesh, n_pts, sample_color=True, seed=seed
             )
-        except Exception:
-            pts, face_idx = trimesh.sample.sample_surface(mesh, n_pts)
+        except Exception as exc:
+            logger.debug("CoSMo3D: coloured sampling unavailable (%s); resampling plain", exc)
+            pts, face_idx = trimesh.sample.sample_surface(mesh, n_pts, seed=seed)
             colors = None
 
+        has_texture = True
         if colors is not None:
             rgb = np.asarray(colors, dtype=np.float32)[:, :3]
             if rgb.max() > 1.0:
@@ -206,12 +218,19 @@ class CoSMo3DModel(OD3D_Model):
                 )
                 _, vidx = cKDTree(mesh.vertices).query(pts, k=1)
                 rgb = vert_rgb[vidx]
-            except Exception:
+            except Exception as exc:
                 # untextured mesh — mid-grey matches the encoder's flat fallback
+                logger.debug("CoSMo3D: no vertex colours either (%s); using mid-grey", exc)
                 rgb = np.full((len(pts), 3), 0.5, dtype=np.float32)
+                has_texture = False
 
         nrm = np.asarray(mesh.face_normals, dtype=np.float32)[face_idx]
-        return np.asarray(pts, dtype=np.float32), rgb.astype(np.float32), nrm
+        return (
+            np.asarray(pts, dtype=np.float32),
+            rgb.astype(np.float32),
+            nrm,
+            has_texture,
+        )
 
     @torch.no_grad()
     def _forward_object_batch(self, batch):
@@ -229,7 +248,16 @@ class CoSMo3DModel(OD3D_Model):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         tri = _mesh_to_trimesh(mesh)
 
-        pts, rgb, nrm = self._sample_colored_surface(tri, self.n_sample_pts)
+        pts, rgb, nrm, has_texture = self._sample_colored_surface(
+            tri, self.n_sample_pts, seed=self.seed
+        )
+        if self.use_texture and not has_texture:
+            # Loud on purpose: without this the run still completes and reports a
+            # "textured" number that is actually the grey ablation.
+            logger.warning(
+                "CoSMo3D: use_texture=True but this mesh carries no usable colour — "
+                "falling back to flat grey, so this measurement is NOT the textured one."
+            )
 
         # Coordinate-frame conversion: (x,y,z) → (−x, z, y)  [upstream app/segment/_data.py]
         coord = np.stack([-pts[:, 0], pts[:, 2], pts[:, 1]], axis=1).astype(np.float32)

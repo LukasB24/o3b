@@ -1,5 +1,14 @@
 import os
-os.environ.setdefault("XFORMERS_DISABLED", "1")  # dinov2 MemEffAttention has no backend for compute capability >= 12.0 (Blackwell)
+
+# dinov2's MemEffAttention has no xformers backend for compute capability >= 12.0
+# (Blackwell), so fall back to its plain-PyTorch path there. dinov2 reads this
+# env var at *import* time (dinov2/layers/{attention,block,swiglu_ffn}.py), which
+# is why it has to be set before the hub load further down. Gated on the GPU so
+# that Ampere/Hopper users keep the faster fused kernels.
+from o3b.model.xformers_compat import needs_sdpa_fallback
+
+if needs_sdpa_fallback():
+    os.environ.setdefault("XFORMERS_DISABLED", "1")
 import logging
 
 logger = logging.getLogger(__name__)

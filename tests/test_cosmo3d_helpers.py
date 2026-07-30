@@ -112,13 +112,28 @@ def test_vertex_colours_are_scaled_to_unit_range():
     )
 
     n_pts = 32
-    pts, rgb, nrm = CoSMo3DModel._sample_colored_surface(box, n_pts)
+    pts, rgb, nrm, has_texture = CoSMo3DModel._sample_colored_surface(box, n_pts)
 
     assert pts.shape == (n_pts, 3)
     assert rgb.shape == (n_pts, 3)
     assert nrm.shape == (n_pts, 3)
     assert rgb.max() <= 1.0, "colours must be scaled out of 0-255 byte range"
     assert np.allclose(rgb[:, 0], 1.0) and np.allclose(rgb[:, 1:], 0.0)
+    assert has_texture, "a coloured mesh must not be reported as untextured"
+
+
+def test_sampling_is_deterministic_for_a_fixed_seed():
+    """PCK is a benchmark number; identical inputs must give identical samples."""
+    import trimesh
+
+    sphere = trimesh.creation.icosphere(subdivisions=2)
+
+    first, _, _, _ = CoSMo3DModel._sample_colored_surface(sphere, 64, seed=0)
+    again, _, _, _ = CoSMo3DModel._sample_colored_surface(sphere, 64, seed=0)
+    other, _, _, _ = CoSMo3DModel._sample_colored_surface(sphere, 64, seed=1)
+
+    assert np.array_equal(first, again), "same seed must reproduce the same samples"
+    assert not np.array_equal(first, other), "a different seed should actually resample"
 
 
 def test_untextured_mesh_falls_back_to_mid_grey(monkeypatch):
@@ -151,7 +166,11 @@ def test_untextured_mesh_falls_back_to_mid_grey(monkeypatch):
         visual=_ColourlessVisual(),
     )
 
-    _, rgb, _ = CoSMo3DModel._sample_colored_surface(mesh, n_pts)
+    _, rgb, _, has_texture = CoSMo3DModel._sample_colored_surface(mesh, n_pts)
 
     assert rgb.shape == (n_pts, 3)
     assert np.allclose(rgb, 0.5)
+    assert not has_texture, (
+        "the caller relies on this flag to warn that a use_texture=True run "
+        "silently became the grey ablation"
+    )

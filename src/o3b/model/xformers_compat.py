@@ -26,6 +26,64 @@ logger = logging.getLogger(__name__)
 _PATCHED = False
 
 
+def needs_sdpa_fallback() -> bool:
+    """True when this GPU has no usable fused xformers kernel (sm_120+).
+
+    Shared with ``o3b.model.dino.model``, which disables xformers inside DINOv2
+    via ``XFORMERS_DISABLED``: both workarounds target the same GPUs, so they
+    must agree on which GPUs those are rather than each guessing.
+    """
+    try:
+        import torch
+    except ImportError:
+        return False
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return torch.cuda.get_device_capability()[0] >= 12
+    except Exception:  # driver/init trouble — assume the fused path is fine
+        return False
+
+
+def sdpa_memory_efficient_attention(query, key, value, attn_bias=None, p=0.0,
+                                    scale=None, op=None, **kwargs):
+    """Drop-in ``memory_efficient_attention`` backed by PyTorch SDPA.
+
+    Module level rather than a closure so it can be tested on any GPU — this
+    function silently changes model outputs if its layout handling is wrong.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    # xformers accepts two layouts, and both are used in this stack:
+    #   4-D (B, M, H, K) — SD's VAE self-attention
+    #   3-D (B, M, K)    — the UNet cross-attention, which folds heads into
+    #                      the batch dim before calling (ldm attention.py)
+    # SDPA always wants (B, H, M, K), so normalise, then restore.
+    if attn_bias is not None and not torch.is_tensor(attn_bias):
+        raise NotImplementedError(
+            "xformers SDPA shim supports only None or tensor attn_bias, "
+            f"got {type(attn_bias).__name__}"
+        )
+    squeeze_heads = query.ndim == 3
+    if squeeze_heads:
+        q, k, v = (t.unsqueeze(1) for t in (query, key, value))
+        # The head axis we just inserted has to be inserted in the bias too:
+        # a 3-D bias is (B, M, N), and SDPA broadcasts attn_mask against
+        # (B, H, M, N). Without this, (B, M, N) right-aligns to (1, B, M, N)
+        # and blows up to (B, B, M, N) — a shape error for B > 1, and correct
+        # only by accident when B == 1.
+        if attn_bias is not None and attn_bias.ndim == 3:
+            attn_bias = attn_bias.unsqueeze(1)
+    else:
+        q, k, v = (t.transpose(1, 2) for t in (query, key, value))
+    out = F.scaled_dot_product_attention(
+        q, k, v, attn_mask=attn_bias, dropout_p=p, scale=scale
+    )
+    out = out.squeeze(1) if squeeze_heads else out.transpose(1, 2)
+    return out.contiguous()
+
+
 def patch_xformers_memory_efficient_attention() -> None:
     """Point ``xformers.ops.memory_efficient_attention`` at PyTorch SDPA. Idempotent."""
     global _PATCHED
@@ -40,42 +98,17 @@ def patch_xformers_memory_efficient_attention() -> None:
         return
 
     # Only Blackwell and newer need this; leave working setups on the fused path.
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 12:
+    if not needs_sdpa_fallback():
         _PATCHED = True
         return
 
-    import torch.nn.functional as F
-
-    def _memory_efficient_attention(query, key, value, attn_bias=None, p=0.0,
-                                    scale=None, op=None, **kwargs):
-        # xformers accepts two layouts, and both are used in this stack:
-        #   4-D (B, M, H, K) — SD's VAE self-attention
-        #   3-D (B, M, K)    — the UNet cross-attention, which folds heads into
-        #                      the batch dim before calling (ldm attention.py)
-        # SDPA always wants (B, H, M, K), so normalise, then restore.
-        if attn_bias is not None and not torch.is_tensor(attn_bias):
-            raise NotImplementedError(
-                "xformers SDPA shim supports only None or tensor attn_bias, "
-                f"got {type(attn_bias).__name__}"
-            )
-        squeeze_heads = query.ndim == 3
-        if squeeze_heads:
-            q, k, v = (t.unsqueeze(1) for t in (query, key, value))
-        else:
-            q, k, v = (t.transpose(1, 2) for t in (query, key, value))
-        out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_bias, dropout_p=p, scale=scale
-        )
-        out = out.squeeze(1) if squeeze_heads else out.transpose(1, 2)
-        return out.contiguous()
-
-    xformers.ops.memory_efficient_attention = _memory_efficient_attention
+    xformers.ops.memory_efficient_attention = sdpa_memory_efficient_attention
     # ldm/odise bind the symbol via `import xformers` + `xformers.ops.…`, so
     # patching the attribute above is enough for them. Also patch the fmha
     # module, which some call sites import from directly.
     try:
         import xformers.ops.fmha as _fmha
-        _fmha.memory_efficient_attention = _memory_efficient_attention
+        _fmha.memory_efficient_attention = sdpa_memory_efficient_attention
     except ImportError:
         pass
 

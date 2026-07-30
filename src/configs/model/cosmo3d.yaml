@@ -5,3 +5,4 @@ n_sample_pts: 5000                        # upstream default; 20k measured no be
 grid_size: 0.02                            # GridSample voxel edge, metric (model is not scale-free)
 freeze: true
 use_texture: true                          # published usage; grey measured indistinguishable (see README)
+seed: 0                                    # surface-sampling seed; fixed so PCK is reproducible

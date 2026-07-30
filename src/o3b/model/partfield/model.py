@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import urllib.request
 from pathlib import Path
 
@@ -42,11 +43,17 @@ class PartFieldModel(OD3D_Model):
         pvcnn_z_triplane_channels: int = 256,
         pvcnn_z_triplane_resolution: int = 128,
         freeze: bool = True,
+        seed: int = 0,
     ):
         super().__init__()
-        self.ckpt_path = ckpt_path
+        # env override wins, so the model also works from a CWD without the
+        # checkpoint tree (mirrors COSMO3D_CKPT in the CoSMo3D adapter).
+        self.ckpt_path = os.environ.get("PARTFIELD_CKPT", ckpt_path)
         self.ckpt_url = ckpt_url
         self.n_pc_points = n_pc_points
+        # Fixed seed for the surface sampling below: PCK is a benchmark number
+        # and must not drift between runs. Set to None for random sampling.
+        self.seed = seed
         self.normalize_extent = normalize_extent
         self.n_sample_each = n_sample_each
         self.triplane_channels_low = triplane_channels_low
@@ -74,9 +81,20 @@ class PartFieldModel(OD3D_Model):
         return ckpt_path
 
     def _build_modules(self, device: torch.device):
-        # Cache the built (pvcnn, triplane_transformer) per (ckpt, device) so we
-        # don't reload the 1.2 GB checkpoint on every mesh during generation.
-        cache_key = (str(self.ckpt_path), str(device))
+        # Cache the built (pvcnn, triplane_transformer) per (ckpt, device, arch)
+        # so we don't reload the 1.2 GB checkpoint on every mesh during
+        # generation. The architecture params are part of the key: they change
+        # what gets built, so two differently-configured instances must not
+        # silently share the first one's modules.
+        cache_key = (
+            str(self.ckpt_path),
+            str(device),
+            self.triplane_channels_low,
+            self.triplane_channels_high,
+            self.sdf_channels,
+            self.pvcnn_z_triplane_channels,
+            self.pvcnn_z_triplane_resolution,
+        )
         cached = _MODULE_CACHE.get(cache_key)
         if cached is not None:
             return cached
@@ -116,6 +134,10 @@ class PartFieldModel(OD3D_Model):
             triplane_dim=self.triplane_channels_high,
         )
 
+        # weights_only=False is required: this is a PyTorch Lightning checkpoint
+        # whose pickle carries non-tensor hparams, so weights_only=True raises.
+        # That makes loading equivalent to trusting `ckpt_url` — keep it pointed
+        # at the official release.
         ckpt = torch.load(self._ensure_ckpt(), map_location="cpu", weights_only=False)
         state_dict = ckpt["state_dict"]
         pvcnn.load_state_dict(
@@ -162,7 +184,7 @@ class PartFieldModel(OD3D_Model):
         verts_normed = (verts - center) * scale
 
         tri = trimesh.Trimesh(vertices=verts_normed, faces=faces, process=False)
-        pc, _ = trimesh.sample.sample_surface(tri, self.n_pc_points)
+        pc, _ = trimesh.sample.sample_surface(tri, self.n_pc_points, seed=self.seed)
         pc = torch.tensor(np.asarray(pc), dtype=torch.float32, device=device).unsqueeze(0)
 
         pvcnn, triplane_transformer = self._build_modules(device)

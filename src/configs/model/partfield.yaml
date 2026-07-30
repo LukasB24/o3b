@@ -10,3 +10,4 @@ sdf_channels: 64           # feature dim = triplane_channels_high - sdf_channels
 pvcnn_z_triplane_channels: 256
 pvcnn_z_triplane_resolution: 128
 freeze: true
+seed: 0                    # surface-sampling seed; fixed so PCK is reproducible
